@@ -16,10 +16,10 @@ NVIDIA_NIM_DEFAULT_BASE = "https://integrate.api.nvidia.com/v1"
 # Moonshot Kimi Anthropic-compatible Messages API (POST …/messages).
 KIMI_DEFAULT_BASE = "https://api.moonshot.ai/anthropic/v1"
 WAFER_DEFAULT_BASE = "https://pass.wafer.ai/v1"
-# DeepSeek Anthropic-compatible Messages API (not OpenAI ``/v1`` chat completions).
-DEEPSEEK_ANTHROPIC_DEFAULT_BASE = "https://api.deepseek.com/anthropic"
-# Historical export name: DeepSeek upstream is the native Anthropic path above.
-DEEPSEEK_DEFAULT_BASE = DEEPSEEK_ANTHROPIC_DEFAULT_BASE
+# DeepSeek OpenAI-compatible chat completions API.
+DEEPSEEK_DEFAULT_BASE = "https://api.deepseek.com/v1"
+# Historical export name: DeepSeek upstream is the OpenAI path above.
+DEEPSEEK_ANTHROPIC_DEFAULT_BASE = DEEPSEEK_DEFAULT_BASE
 FIREWORKS_DEFAULT_BASE = "https://api.fireworks.ai/inference/v1"
 OPENROUTER_DEFAULT_BASE = "https://openrouter.ai/api/v1"
 MISTRAL_DEFAULT_BASE = "https://api.mistral.ai/v1"
@@ -87,12 +87,12 @@ PROVIDER_CATALOG: dict[str, ProviderDescriptor] = {
     ),
     "deepseek": ProviderDescriptor(
         provider_id="deepseek",
-        transport_type="anthropic_messages",
+        transport_type="openai_chat",
         credential_env="DEEPSEEK_API_KEY",
         credential_url="https://platform.deepseek.com/api_keys",
         credential_attr="deepseek_api_key",
-        default_base_url=DEEPSEEK_ANTHROPIC_DEFAULT_BASE,
-        capabilities=("chat", "streaming", "tools", "thinking", "native_anthropic"),
+        default_base_url=DEEPSEEK_DEFAULT_BASE,
+        capabilities=("chat", "streaming", "tools", "thinking", "rate_limit"),
     ),
     "mistral": ProviderDescriptor(
         provider_id="mistral",
