@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from api.models.anthropic import MessagesRequest, Message, Tool
+from api.models.anthropic import Message, MessagesRequest, Tool
 from providers.base import ProviderConfig
 from providers.deepseek import DEEPSEEK_DEFAULT_BASE, DeepSeekProvider
 from providers.exceptions import InvalidRequestError

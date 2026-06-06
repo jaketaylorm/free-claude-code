@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import openai
 import pytest
 
 from config.nim import NimSettings
@@ -203,7 +204,7 @@ class TestStreamingExceptionHandling:
 
         event_text = "".join(events)
         assert "timed out after" in event_text
-        assert "request_id=req_timeout123" in event_text
+        assert "Request ID: req_timeout123" in event_text
         assert "message_stop" in event_text
         _assert_no_content_deltas_after_error_text(events, "timed out after")
 
@@ -505,11 +506,241 @@ class TestStreamingExceptionHandling:
             "Upstream provider NIM rejected the request method or endpoint (HTTP 405)."
             in event_text
         )
-        assert "request_id=REQ405" in event_text
+        assert "Request ID: REQ405" in event_text
         _assert_no_content_deltas_after_error_text(
             events,
             "Upstream provider NIM rejected the request method or endpoint (HTTP 405).",
         )
+
+    @pytest.mark.asyncio
+    async def test_stream_with_openai_bad_request_surfaces_upstream_body(self):
+        """OpenAI SDK bodies should be emitted so users can copy exact provider errors."""
+        provider = _make_provider()
+        request = _make_request()
+        response = httpx.Response(
+            status_code=400,
+            request=httpx.Request("POST", "https://example.com/v1/chat/completions"),
+        )
+        body = {
+            "error": {
+                "type": "BadRequest",
+                "message": "Thinking mode does not support this tool_choice",
+            }
+        }
+        error = openai.BadRequestError("Bad Request", response=response, body=body)
+
+        with patch.object(
+            provider._client.chat.completions,
+            "create",
+            new_callable=AsyncMock,
+            side_effect=error,
+        ):
+            events = [
+                e
+                async for e in provider.stream_response(
+                    request,
+                    request_id="REQ_BODY",
+                )
+            ]
+
+        event_text = "".join(events)
+        message_text = "".join(
+            str(ev.data.get("delta", {}).get("text", ""))
+            for ev in parse_sse_text(event_text)
+            if ev.event == "content_block_delta"
+            and ev.data.get("delta", {}).get("type") == "text_delta"
+        )
+        assert "Upstream provider NIM returned HTTP 400." in event_text
+        assert "Category: BadRequest" in event_text
+        assert "Thinking mode does not support this tool_choice" in event_text
+        assert (
+            '{"error":{"type":"BadRequest","message":"Thinking mode does not support this tool_choice"}}'
+            in message_text
+        )
+        assert "Request ID: REQ_BODY" in event_text
+        _assert_no_content_deltas_after_error_text(
+            events,
+            "Upstream provider NIM returned HTTP 400.",
+        )
+
+    @pytest.mark.asyncio
+    async def test_error_after_native_tool_call_top_level_error_includes_body(self):
+        """After a tool_use block, detailed provider errors remain top-level SSE errors."""
+        provider = _make_provider()
+        request = _make_request()
+        tool_chunk = _make_tool_calls_chunk(
+            name="echo_smoke", arguments="{}", tool_id="call_body", index=0
+        )
+        response = httpx.Response(
+            status_code=400,
+            request=httpx.Request("POST", "https://example.com/v1/chat/completions"),
+        )
+        body = {"error": {"message": "bad after tool"}}
+        error = openai.BadRequestError("Bad Request", response=response, body=body)
+        stream_mock = AsyncStreamMock([tool_chunk], error=error)
+
+        with patch.object(
+            provider._client.chat.completions,
+            "create",
+            new_callable=AsyncMock,
+            return_value=stream_mock,
+        ):
+            events = [
+                e
+                async for e in provider.stream_response(
+                    request,
+                    request_id="REQ_TOOL_BODY",
+                )
+            ]
+
+        event_text = "".join(events)
+        assert "tool_use" in event_text
+        assert "event: error\n" in event_text
+        assert "bad after tool" in event_text
+        assert "Request ID: REQ_TOOL_BODY" in event_text
+        _assert_error_not_in_text_deltas_after_tool(events, "bad after tool")
+
+    @pytest.mark.asyncio
+    async def test_clean_eof_after_complete_tool_call_salvages_tool_use(self):
+        """A complete tool JSON payload missing finish_reason is committed as tool_use."""
+        provider = _make_provider()
+        request = _make_request()
+        tool_chunk = _make_tool_calls_chunk(
+            name="echo_smoke", arguments='{"message":"ok"}', tool_id="call_eof"
+        )
+        stream_mock = AsyncStreamMock([tool_chunk])
+
+        with patch.object(
+            provider._client.chat.completions,
+            "create",
+            new_callable=AsyncMock,
+            return_value=stream_mock,
+        ):
+            events = await _collect_stream(provider, request)
+
+        parsed = parse_sse_text("".join(events))
+        assert parsed[-1].event == "message_stop"
+        assert any(
+            event.event == "message_delta"
+            and event.data.get("delta", {}).get("stop_reason") == "tool_use"
+            for event in parsed
+        )
+        assert not any(event.event == "error" for event in parsed)
+
+    @pytest.mark.asyncio
+    async def test_precommit_openai_holdback_retries_without_leaking_partial(self):
+        """A retryable early cutoff before holdback commit is retried invisibly."""
+        provider = _make_provider()
+        request = _make_request()
+        first_stream = AsyncStreamMock(
+            [_make_chunk(content="hidden")],
+            error=httpx.ReadError("early cutoff"),
+        )
+        second_stream = AsyncStreamMock(
+            [
+                _make_chunk(content="visible"),
+                _make_chunk(finish_reason="stop"),
+            ]
+        )
+
+        with patch.object(
+            provider._client.chat.completions,
+            "create",
+            new_callable=AsyncMock,
+            side_effect=[first_stream, second_stream],
+        ) as mock_create:
+            events = await _collect_stream(provider, request)
+
+        event_text = "".join(events)
+        assert mock_create.await_count == 2
+        assert "hidden" not in event_text
+        assert "visible" in event_text
+        assert parse_sse_text(event_text)[-1].event == "message_stop"
+
+    @pytest.mark.asyncio
+    async def test_clean_eof_after_text_continues_with_overlap_trim(self):
+        """A truncated text stream is continued and duplicate overlap is trimmed."""
+        provider = _make_provider()
+        request = _make_request()
+        stream_mock = AsyncStreamMock([_make_chunk(content="hello wor")])
+
+        with (
+            patch.object(
+                provider._client.chat.completions,
+                "create",
+                new_callable=AsyncMock,
+                return_value=stream_mock,
+            ),
+            patch.object(
+                provider,
+                "_collect_recovery_text",
+                new_callable=AsyncMock,
+                return_value=("world", ""),
+            ),
+        ):
+            events = await _collect_stream(provider, request)
+
+        parsed = parse_sse_text("".join(events))
+        text = "".join(
+            event.data.get("delta", {}).get("text", "")
+            for event in parsed
+            if event.event == "content_block_delta"
+        )
+        assert text == "hello world"
+        assert any(
+            event.event == "message_delta"
+            and event.data.get("delta", {}).get("stop_reason") == "end_turn"
+            for event in parsed
+        )
+        assert not any(event.event == "error" for event in parsed)
+
+    @pytest.mark.asyncio
+    async def test_incomplete_tool_call_repair_appends_schema_valid_suffix(self):
+        """A truncated tool JSON prefix is repaired append-only before tool_use tail."""
+        provider = _make_provider()
+        request = _make_request()
+        request.tools = [
+            SimpleNamespace(
+                name="echo_smoke",
+                description="Echo",
+                input_schema={
+                    "type": "object",
+                    "properties": {"message": {"type": "string"}},
+                    "required": ["message"],
+                    "additionalProperties": False,
+                },
+            )
+        ]
+        tool_chunk = _make_tool_calls_chunk(
+            name="echo_smoke", arguments='{"message":', tool_id="call_repair"
+        )
+        stream_mock = AsyncStreamMock([tool_chunk])
+
+        with (
+            patch.object(
+                provider._client.chat.completions,
+                "create",
+                new_callable=AsyncMock,
+                return_value=stream_mock,
+            ),
+            patch.object(
+                provider,
+                "_collect_recovery_text",
+                new_callable=AsyncMock,
+                return_value=('"ok"}', ""),
+            ),
+        ):
+            events = await _collect_stream(provider, request)
+
+        event_text = "".join(events)
+        parsed = parse_sse_text(event_text)
+        assert '"partial_json": "\\"ok\\"}"' in event_text
+        assert any(
+            event.event == "message_delta"
+            and event.data.get("delta", {}).get("stop_reason") == "tool_use"
+            for event in parsed
+        )
+        assert not any(event.event == "error" for event in parsed)
 
     @pytest.mark.asyncio
     async def test_stream_rate_limited_retries_via_execute_with_retry(self):
@@ -707,6 +938,23 @@ class TestProcessToolCall:
         events = list(provider._process_tool_call(tc, sse))
         # Should not crash, should still emit events
         assert len(events) > 0
+
+    def test_none_tool_index_defaults_to_zero(self):
+        """Gemini may stream tool_call deltas with a null index."""
+        provider = _make_provider()
+        from core.anthropic import SSEBuilder
+
+        sse = SSEBuilder("msg_test", "test-model")
+        tc = {
+            "index": None,
+            "id": "call_none",
+            "function": {"name": "test", "arguments": "{}"},
+        }
+        events = list(provider._process_tool_call(tc, sse))
+        event_text = "".join(events)
+
+        assert "tool_use" in event_text
+        assert "call_none" in event_text
 
     def test_tool_args_emitted_as_delta(self):
         """Arguments are emitted as input_json_delta events."""

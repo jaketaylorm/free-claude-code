@@ -42,8 +42,8 @@ TARGET_ALIASES = {
 SECRET_KEY_PARTS = ("KEY", "TOKEN", "SECRET", "WEBHOOK", "AUTH")
 
 PROVIDER_SMOKE_DEFAULT_MODELS: dict[str, str] = {
-    "nvidia_nim": "nvidia_nim/z-ai/glm4.7",
-    "open_router": "open_router/stepfun/step-3.5-flash:free",
+    "nvidia_nim": "nvidia_nim/nvidia/nemotron-3-super-120b-a12b",
+    "open_router": "open_router/moonshotai/kimi-k2.6:free",
     "mistral": "mistral/devstral-small-latest",
     "mistral_codestral": "mistral_codestral/codestral-latest",
     "deepseek": "deepseek/deepseek-v4-pro",
@@ -54,7 +54,7 @@ PROVIDER_SMOKE_DEFAULT_MODELS: dict[str, str] = {
     "opencode": "opencode/gpt-5.3-codex",
     "opencode_go": "opencode_go/minimax-m2.7",
     "zai": "zai/glm-5.1",
-    "gemini": "gemini/gemini-2.5-flash",
+    "gemini": "gemini/models/gemini-3.1-flash-lite",
     "groq": "groq/llama-3.3-70b-versatile",
     "cerebras": "cerebras/llama3.1-8b",
 }
@@ -71,8 +71,6 @@ NVIDIA_NIM_CLI_DEFAULT_MODELS: tuple[str, ...] = (
 OPENROUTER_FREE_CLI_DEFAULT_MODELS: tuple[str, ...] = (
     "nvidia/nemotron-3-super-120b-a12b:free",
     "openai/gpt-oss-120b:free",
-    "minimax/minimax-m2.5:free",
-    "inclusionai/ring-2.6-1t:free",
     "poolside/laguna-m.1:free",
 )
 

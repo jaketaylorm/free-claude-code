@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-import json
 from copy import copy
 from typing import Any
 
 from loguru import logger
 
 from core.anthropic import ReasoningReplayMode, build_base_request_body
-from core.anthropic.conversion import OpenAIConversionError, get_block_attr, get_block_type
+from core.anthropic.conversion import (
+    OpenAIConversionError,
+    get_block_attr,
+    get_block_type,
+)
 from providers.exceptions import InvalidRequestError
 
 _UNSUPPORTED_MESSAGE_BLOCK_TYPES = frozenset(
@@ -46,7 +49,11 @@ def _walk_block_list_for_unsupported(blocks: Any, *, where: str) -> None:
         return
     for block in blocks:
         btype = get_block_type(block)
-        if btype in ("server_tool_use", "web_search_tool_result", "web_fetch_tool_result"):
+        if btype in (
+            "server_tool_use",
+            "web_search_tool_result",
+            "web_fetch_tool_result",
+        ):
             raise InvalidRequestError(
                 f"DeepSeek native does not support {btype!r} blocks ({where})."
             )
@@ -119,14 +126,20 @@ def _clean_unsupported_blocks(messages: list[Any]) -> tuple[list[Any], bool]:
                             # Replaced with placeholder
                             placeholder_text = _OMITTED_ATTACHMENT_TEXT
                             # If we explicitly had a document, we can use a more specific placeholder
-                            has_doc = any(get_block_type(sub) == "document" for sub in inner)
-                            has_img = any(get_block_type(sub) == "image" for sub in inner)
+                            has_doc = any(
+                                get_block_type(sub) == "document" for sub in inner
+                            )
+                            has_img = any(
+                                get_block_type(sub) == "image" for sub in inner
+                            )
                             if has_doc and not has_img:
                                 placeholder_text = _OMITTED_DOCUMENT_TEXT
-                            
+
                             # Replace tool result content with placeholder text block
                             new_block = copy(block)
-                            new_block.content = [{"type": "text", "text": placeholder_text}]
+                            new_block.content = [
+                                {"type": "text", "text": placeholder_text}
+                            ]
                             new_content.append(new_block)
                         else:
                             new_block = copy(block)
@@ -167,7 +180,9 @@ def build_request_body(request_data: Any, *, thinking_enabled: bool) -> dict:
     # Copy request data to clean messages safely
     cleaned_request_data = copy(request_data)
     if hasattr(cleaned_request_data, "messages") and cleaned_request_data.messages:
-        cleaned_msgs, any_stripped = _clean_unsupported_blocks(cleaned_request_data.messages)
+        cleaned_msgs, any_stripped = _clean_unsupported_blocks(
+            cleaned_request_data.messages
+        )
         cleaned_request_data.messages = cleaned_msgs
         if any_stripped:
             logger.warning(

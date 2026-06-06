@@ -32,7 +32,7 @@ class TestSettings:
         monkeypatch.delenv("HTTP_CONNECT_TIMEOUT", raising=False)
         monkeypatch.setitem(Settings.model_config, "env_file", ())
         settings = Settings()
-        assert settings.model == "nvidia_nim/z-ai/glm4.7"
+        assert settings.model == "nvidia_nim/nvidia/nemotron-3-super-120b-a12b"
         assert isinstance(settings.provider_rate_limit, int)
         assert isinstance(settings.provider_rate_window, int)
         assert isinstance(settings.nim.temperature, float)
@@ -350,21 +350,34 @@ class TestSettings:
         assert settings.anthropic_auth_token == "server-token"
         assert settings.uses_process_anthropic_auth_token() is False
 
-    def test_removed_nim_enable_thinking_raises(self, monkeypatch):
-        """NIM_ENABLE_THINKING now fails fast with a migration message."""
+    @pytest.mark.parametrize("removed_key", ["NIM_ENABLE_THINKING", "ENABLE_THINKING"])
+    def test_removed_thinking_env_keys_are_ignored(self, monkeypatch, removed_key):
+        """Stale thinking env keys do not block startup or affect settings."""
         from config.settings import Settings
 
-        monkeypatch.setenv("NIM_ENABLE_THINKING", "false")
-        with pytest.raises(ValidationError, match="ENABLE_MODEL_THINKING"):
-            Settings()
+        monkeypatch.setenv(removed_key, "false")
+        monkeypatch.setitem(Settings.model_config, "env_file", ())
 
-    def test_removed_enable_thinking_raises(self, monkeypatch):
-        """ENABLE_THINKING now fails fast with a migration message."""
+        settings = Settings()
+
+        assert settings.enable_model_thinking is True
+
+    @pytest.mark.parametrize("removed_key", ["NIM_ENABLE_THINKING", "ENABLE_THINKING"])
+    @pytest.mark.parametrize("value", ["false", ""])
+    def test_removed_thinking_dotenv_keys_are_ignored(
+        self, monkeypatch, tmp_path, removed_key, value
+    ):
+        """Stale thinking dotenv keys do not block startup or affect settings."""
         from config.settings import Settings
 
-        monkeypatch.setenv("ENABLE_THINKING", "false")
-        with pytest.raises(ValidationError, match="ENABLE_MODEL_THINKING"):
-            Settings()
+        env_file = tmp_path / ".env"
+        env_file.write_text(f"{removed_key}={value}\n", encoding="utf-8")
+        monkeypatch.delenv(removed_key, raising=False)
+        monkeypatch.setitem(Settings.model_config, "env_file", (env_file,))
+
+        settings = Settings()
+
+        assert settings.enable_model_thinking is True
 
 
 # --- NimSettings Validation Tests ---
@@ -770,7 +783,10 @@ class TestPerModelMapping:
         assert Settings.parse_provider_type("llamacpp/model") == "llamacpp"
         assert Settings.parse_provider_type("ollama/llama3.1") == "ollama"
         assert Settings.parse_provider_type("wafer/DeepSeek-V4-Pro") == "wafer"
-        assert Settings.parse_provider_type("gemini/gemini-2.5-flash") == "gemini"
+        assert (
+            Settings.parse_provider_type("gemini/models/gemini-3.1-flash-lite")
+            == "gemini"
+        )
         assert Settings.parse_provider_type("groq/llama-3.3-70b-versatile") == "groq"
         assert Settings.parse_provider_type("cerebras/llama3.1-8b") == "cerebras"
 
@@ -793,7 +809,8 @@ class TestPerModelMapping:
         assert Settings.parse_model_name("ollama/llama3.1") == "llama3.1"
         assert Settings.parse_model_name("wafer/DeepSeek-V4-Pro") == "DeepSeek-V4-Pro"
         assert (
-            Settings.parse_model_name("gemini/gemini-2.5-flash") == "gemini-2.5-flash"
+            Settings.parse_model_name("gemini/models/gemini-3.1-flash-lite")
+            == "models/gemini-3.1-flash-lite"
         )
         assert (
             Settings.parse_model_name("groq/llama-3.3-70b-versatile")

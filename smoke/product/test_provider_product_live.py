@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 import pytest
 
 from config.provider_catalog import PROVIDER_CATALOG
 from core.anthropic.stream_contracts import (
+    SSEEvent,
     assert_anthropic_stream_contract,
     parse_sse_lines,
     text_content,
@@ -40,37 +43,74 @@ def test_model_mapping_matrix_e2e(smoke_config: SmokeConfig) -> None:
         assert model.model_name
 
 
-def test_provider_text_multiturn_e2e(smoke_config: SmokeConfig) -> None:
-    _run_for_each_provider(smoke_config, _scenario_text_multiturn)
+def test_provider_text_multiturn_e2e(
+    smoke_config: SmokeConfig, provider_model: ProviderModel
+) -> None:
+    _run_provider_scenario(smoke_config, provider_model, _scenario_text_multiturn)
 
 
-def test_provider_adaptive_thinking_history_e2e(smoke_config: SmokeConfig) -> None:
-    _run_for_each_provider(smoke_config, _scenario_adaptive_thinking_history)
+def test_provider_adaptive_thinking_history_e2e(
+    smoke_config: SmokeConfig, provider_model: ProviderModel
+) -> None:
+    _run_provider_scenario(
+        smoke_config, provider_model, _scenario_adaptive_thinking_history
+    )
 
 
-def test_provider_interleaved_thinking_tool_e2e(smoke_config: SmokeConfig) -> None:
-    _run_for_each_provider(smoke_config, _scenario_interleaved_history)
+def test_provider_interleaved_thinking_tool_e2e(
+    smoke_config: SmokeConfig, provider_model: ProviderModel
+) -> None:
+    _run_provider_scenario(smoke_config, provider_model, _scenario_interleaved_history)
 
 
 @pytest.mark.smoke_target("tools")
-def test_provider_tool_use_then_text_history_e2e(smoke_config: SmokeConfig) -> None:
+def test_provider_tool_use_then_text_history_e2e(
+    smoke_config: SmokeConfig, provider_model: ProviderModel
+) -> None:
     """OpenAI-compatible path: history with tool_use + assistant text after tool (issue #206)."""
-    _run_for_each_provider(smoke_config, _scenario_tool_use_then_text_in_history)
+    _run_provider_scenario(
+        smoke_config, provider_model, _scenario_tool_use_then_text_in_history
+    )
 
 
 @pytest.mark.smoke_target("tools")
-def test_provider_tool_result_continuation_e2e(smoke_config: SmokeConfig) -> None:
-    _run_for_each_provider(smoke_config, _scenario_tool_result_continuation)
+def test_provider_tool_result_continuation_e2e(
+    smoke_config: SmokeConfig, provider_model: ProviderModel
+) -> None:
+    _run_provider_scenario(
+        smoke_config, provider_model, _scenario_tool_result_continuation
+    )
 
 
 @pytest.mark.smoke_target("tools")
-def test_provider_reasoning_tool_continuation_e2e(smoke_config: SmokeConfig) -> None:
-    _run_for_each_thinking_provider(smoke_config, _scenario_reasoning_tool_continuation)
+def test_gemini_thought_signature_tool_continuation_e2e(
+    smoke_config: SmokeConfig, provider_model: ProviderModel
+) -> None:
+    if provider_model.provider != "gemini":
+        pytest.skip("gemini-specific smoke scenario")
+    _run_provider_scenario(
+        smoke_config,
+        provider_model,
+        _scenario_gemini_thought_signature_tool_continuation,
+    )
+
+
+@pytest.mark.smoke_target("tools")
+def test_provider_reasoning_tool_continuation_e2e(
+    smoke_config: SmokeConfig, provider_model: ProviderModel
+) -> None:
+    if not _provider_smoke_thinking_enabled(smoke_config, provider_model):
+        pytest.skip(f"{provider_model.provider} smoke model does not enable thinking")
+    _run_provider_scenario(
+        smoke_config, provider_model, _scenario_reasoning_tool_continuation
+    )
 
 
 @pytest.mark.smoke_target("rate_limit")
-def test_provider_disconnect_e2e(smoke_config: SmokeConfig) -> None:
-    _run_for_each_provider(smoke_config, _scenario_disconnect)
+def test_provider_disconnect_e2e(
+    smoke_config: SmokeConfig, provider_model: ProviderModel
+) -> None:
+    _run_provider_scenario(smoke_config, provider_model, _scenario_disconnect)
 
 
 def test_provider_error_e2e(smoke_config: SmokeConfig) -> None:
@@ -131,42 +171,36 @@ def test_openrouter_native_e2e(smoke_config: SmokeConfig) -> None:
                 "thinking": {"type": "adaptive", "budget_tokens": 1024},
             }
         )
-    assert_product_stream(turn.events)
+    _assert_provider_product_stream(turn.events)
 
 
-def _run_for_each_provider(smoke_config: SmokeConfig, scenario) -> None:
-    failures: list[str] = []
-    for provider_model in ProviderMatrixDriver(smoke_config).provider_smoke_models():
-        try:
-            scenario(smoke_config, provider_model)
-        except Exception as exc:
-            skip_if_upstream_unavailable_exception(exc)
-            failures.append(
-                f"{provider_model.source}={provider_model.full_model}: "
-                f"{type(exc).__name__}: {exc}"
-            )
-    assert not failures, "\n".join(failures)
+def _run_provider_scenario(
+    smoke_config: SmokeConfig,
+    provider_model: ProviderModel,
+    scenario,
+) -> None:
+    try:
+        scenario(smoke_config, provider_model)
+    except Exception as exc:
+        skip_if_upstream_unavailable_exception(exc)
+        raise AssertionError(
+            f"{provider_model.source}={provider_model.full_model}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
 
 
-def _run_for_each_thinking_provider(smoke_config: SmokeConfig, scenario) -> None:
-    failures: list[str] = []
-    models = [
-        provider_model
-        for provider_model in ProviderMatrixDriver(smoke_config).provider_smoke_models()
-        if _provider_smoke_thinking_enabled(smoke_config, provider_model)
-    ]
-    if not models:
-        pytest.skip("missing_env: no thinking-capable provider smoke model configured")
-    for provider_model in models:
-        try:
-            scenario(smoke_config, provider_model)
-        except Exception as exc:
-            skip_if_upstream_unavailable_exception(exc)
-            failures.append(
-                f"{provider_model.source}={provider_model.full_model}: "
-                f"{type(exc).__name__}: {exc}"
-            )
-    assert not failures, "\n".join(failures)
+def _assert_provider_product_stream(events: list[SSEEvent]) -> None:
+    skip_if_upstream_unavailable_events(events)
+    assert_product_stream(events)
+
+
+def _tool_use_blocks_or_skip(
+    events: list[SSEEvent], message: str
+) -> list[dict[str, Any]]:
+    skip_if_upstream_unavailable_events(events)
+    blocks = tool_use_blocks(events)
+    assert blocks, message
+    return blocks
 
 
 def _provider_smoke_thinking_enabled(
@@ -186,8 +220,8 @@ def _scenario_text_multiturn(
         driver = ConversationDriver(server, smoke_config)
         first = driver.ask("Reply with one short sentence.")
         second = driver.ask("Reply with a different short sentence.")
-    assert_product_stream(first.events)
-    assert_product_stream(second.events)
+    _assert_provider_product_stream(first.events)
+    _assert_provider_product_stream(second.events)
 
 
 def _scenario_adaptive_thinking_history(
@@ -212,7 +246,7 @@ def _scenario_adaptive_thinking_history(
     }
     with _server_for_provider(smoke_config, provider_model, "adaptive") as server:
         turn = ConversationDriver(server, smoke_config).stream(payload)
-    assert_product_stream(turn.events)
+    _assert_provider_product_stream(turn.events)
 
 
 def _scenario_interleaved_history(
@@ -252,7 +286,7 @@ def _scenario_interleaved_history(
     }
     with _server_for_provider(smoke_config, provider_model, "interleaved") as server:
         turn = ConversationDriver(server, smoke_config).stream(payload)
-    assert_product_stream(turn.events)
+    _assert_provider_product_stream(turn.events)
 
 
 def _scenario_tool_use_then_text_in_history(
@@ -298,7 +332,7 @@ def _scenario_tool_use_then_text_in_history(
     }
     with _server_for_provider(smoke_config, provider_model, "tool-206") as server:
         turn = ConversationDriver(server, smoke_config).stream(payload)
-    assert_product_stream(turn.events)
+    _assert_provider_product_stream(turn.events)
 
 
 def _scenario_tool_result_continuation(
@@ -317,8 +351,9 @@ def _scenario_tool_result_continuation(
     with _server_for_provider(smoke_config, provider_model, "tool") as server:
         driver = ConversationDriver(server, smoke_config)
         first = driver.stream(first_payload)
-        tool_uses = tool_use_blocks(first.events)
-        assert tool_uses, "provider did not emit a tool_use block"
+        tool_uses = _tool_use_blocks_or_skip(
+            first.events, "provider did not emit a tool_use block"
+        )
         tool_use = tool_uses[0]
         second_payload = {
             "model": "claude-sonnet-4-5-20250929",
@@ -340,8 +375,70 @@ def _scenario_tool_result_continuation(
             "tools": [echo_tool_schema()],
         }
         second = driver.stream(second_payload)
-    assert_product_stream(first.events)
-    assert_product_stream(second.events)
+    _assert_provider_product_stream(first.events)
+    _assert_provider_product_stream(second.events)
+
+
+def _scenario_gemini_thought_signature_tool_continuation(
+    smoke_config: SmokeConfig, provider_model: ProviderModel
+) -> None:
+    first_payload = {
+        "model": "claude-sonnet-4-5-20250929",
+        "max_tokens": 256,
+        "messages": [
+            {"role": "user", "content": "Use echo_smoke once with value FCC_TOOL."}
+        ],
+        "tools": [echo_tool_schema()],
+        "tool_choice": {"type": "tool", "name": "echo_smoke"},
+        "thinking": {"type": "adaptive", "budget_tokens": 1024},
+    }
+    with _server_for_provider(
+        smoke_config, provider_model, "gemini-signature"
+    ) as server:
+        driver = ConversationDriver(server, smoke_config)
+        first = driver.stream(first_payload)
+        tool_uses = _tool_use_blocks_or_skip(
+            first.events, "gemini did not emit a tool_use block"
+        )
+        tool_use = tool_uses[0]
+        signature = _gemini_tool_thought_signature(tool_use)
+        assert signature, (
+            "gemini tool_use did not preserve extra_content.google.thought_signature"
+        )
+        second_payload = {
+            "model": "claude-sonnet-4-5-20250929",
+            "max_tokens": 256,
+            "messages": [
+                first_payload["messages"][0],
+                {"role": "assistant", "content": first.assistant_content},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use["id"],
+                            "content": "FCC_TOOL",
+                        }
+                    ],
+                },
+            ],
+            "tools": [echo_tool_schema()],
+            "thinking": {"type": "adaptive", "budget_tokens": 1024},
+        }
+        second = driver.stream(second_payload)
+    _assert_provider_product_stream(first.events)
+    _assert_provider_product_stream(second.events)
+
+
+def _gemini_tool_thought_signature(tool_use: dict[str, Any]) -> str | None:
+    extra_content = tool_use.get("extra_content")
+    if not isinstance(extra_content, dict):
+        return None
+    google = extra_content.get("google")
+    if not isinstance(google, dict):
+        return None
+    signature = google.get("thought_signature")
+    return signature if isinstance(signature, str) and signature else None
 
 
 def _scenario_reasoning_tool_continuation(
@@ -380,7 +477,7 @@ def _scenario_reasoning_tool_continuation(
     }
     with _server_for_provider(smoke_config, provider_model, "reasoning-tool") as server:
         turn = ConversationDriver(server, smoke_config).stream(payload)
-    assert_product_stream(turn.events)
+    _assert_provider_product_stream(turn.events)
 
 
 def _scenario_disconnect(
@@ -406,8 +503,7 @@ def _scenario_disconnect(
         followup = ConversationDriver(server, smoke_config).ask(
             "Reply with one short sentence."
         )
-    skip_if_upstream_unavailable_events(followup.events)
-    assert_product_stream(followup.events)
+    _assert_provider_product_stream(followup.events)
 
 
 def _server_for_provider(
